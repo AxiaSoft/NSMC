@@ -1,0 +1,58 @@
+{
+    "telegram": {
+        "api_id": 36645091,
+        "api_hash": "a54d1a2296832f015bfce4d5525b9468",
+        "bot_token": "8445302759:AAG-vQNyGFdRfZI43r2-nSVVhIGTsf-tp18"
+    },
+    "admin_ids": [
+        1016053810
+    ],
+    "log_channel_id": -1003040217939,
+    "captcha": {
+        "timeout_seconds": 60,
+        "welcome_text": "سلام {user} عزیز! 🌸\nبه گروه خوش آمدید.\n\nبرای تأیید عضویت و اطمینان از اینکه ربات نیستید، لطفاً ظرف {time} ثانیه روی دکمه زیر کلیک کنید؛ در غیر این صورت از گروه اخراج خواهید شد.",
+        "button_text": "🤖 من ربات نیستم (تأیید عضویت)",
+        "verified_text": "✅ هویت شما با موفقیت تأیید شد. خوش آمدید!",
+        "timeout_text": "⏱️ کاربر {user} به دلیل عدم تأیید کپچا در زمان مقرر ({time} ثانیه) از گروه اخراج شد."
+    },
+    "anti_add": {
+        "max_adds_per_day": 1,
+        "violation_action": "kick",
+        "warning_text": "⚠️ **هشدار امنیتی: نقض سقف مجاز افزودن عضو!**\n\n👤 **کاربر متخلف:** {user} (`{user_id}`)\n📊 **تعداد اد در ۲۴ ساعت:** {count} نفر (سقف مجاز: {limit})\n⚡ **اقدام سیستمی:** {action}\n\n📋 **لیست افراد اضافه شده توسط این کاربر:**\n{members}"
+    },
+    "sweep": {
+        "retention_hours": 24
+    },
+    "modules": {
+        "captcha": true,
+        "anti_add": true,
+        "panic": true,
+        "sweep": true,
+        "logging": false
+    },
+    "command_aliases": {
+        "panic": [
+            "panic",
+            "ریzone",
+            "اضطرار",
+            "بحران"
+        ],
+        "sweep": [
+            "sweep",
+            "جارو",
+            "پاکسازی"
+        ],
+        "config": [
+            "config",
+            "تنظیمات"
+        ],
+        "set": [
+            "set",
+            "تنظیم"
+        ],
+        "toggle": [
+            "toggle",
+            "تغییر"
+        ]
+    }
+}
