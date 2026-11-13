@@ -39,11 +39,45 @@ import sys
 import json
 import time
 import asyncio
+import inspect
+import functools
 import logging
 import platform
+import warnings
 from pathlib import Path
 from datetime import datetime
+from importlib import metadata as pkg_metadata
 from typing import Dict, Any, List, Optional, Tuple
+
+# ---------------------------------------------------------------------------
+# ۰. شیم سازگاری پایتون ۳.۱۲ / ۳.۱۳ / ۳.۱۴ (باید پیش از import پایروگرام اجرا شود)
+# ---------------------------------------------------------------------------
+# کتابخانه Pyrogram 2.0.106 در زمان import تابع asyncio.get_event_loop() را صدا می‌زند.
+# از پایتون ۳.۱۴ به بعد، این تابع در نبود «لوپ جاری» به جای ساخت لوپ جدید، خطای
+#   RuntimeError: There is no current event loop in thread 'MainThread'
+# می‌دهد و ربات پیش از شروع کار می‌شکند. این شیم یک لوپ استاندارد می‌سازد و آن را
+# به عنوان لوپ جاری ثبت می‌کند تا پایروگرام قدیمی هم روی پایتون جدید import شود.
+# روی پایتون‌های قدیمی‌تر هیچ اثر جانبی ندارد.
+def _ensure_event_loop_for_legacy_pyrogram() -> None:
+    """ساخت و ثبت event loop پیش از import پایروگرام (سازگاری با پایتون ۳.۱۲ تا ۳.۱۴)"""
+    if sys.version_info < (3, 10):
+        return
+    with warnings.catch_warnings():
+        # set_event_loop در پایتون‌های جدید DeprecationWarning می‌دهد؛ برای ما بی‌ضرر است
+        warnings.simplefilter("ignore", DeprecationWarning)
+        try:
+            asyncio.get_event_loop()
+        except RuntimeError:
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            except Exception as exc:  # در بدترین حالت ربات با فورک‌های جدید کار می‌کند
+                print(f"⚠️  ساخت event loop پیش از import پایروگرام ناموفق بود: {exc}")
+        except Exception:
+            pass
+
+
+_ensure_event_loop_for_legacy_pyrogram()
 
 import pyrogram
 from pyrogram import Client, filters
@@ -86,7 +120,7 @@ logger = logging.getLogger("AntiRaidBot")
 # ---------------------------------------------------------------------------
 # ۲. ساختار تنظیمات پیش‌فرض (Default Config)
 # ---------------------------------------------------------------------------
-BOT_VERSION: str = "4.0.0"
+BOT_VERSION: str = "4.1.0"
 
 # ساختار تنظیمات پیش‌فرض (Default Config)
 # نکته: کلیدهای جدید نسخه ۴ به صورت «ادغام عمیق» با config.json موجود ترکیب می‌شوند،
@@ -448,6 +482,316 @@ app = Client(
     bot_token=str(BOT_TOKEN) if BOT_TOKEN else "123456:dummy_token_abc_xyz",
     workdir=str(BASE_DIR)
 )
+
+# ---------------------------------------------------------------------------
+# ۵.۵. لایه سازگاری پایتون و کتابخانه تلگرام (Python 3.9–3.14 Compatibility)
+# ---------------------------------------------------------------------------
+# این ربات باید روی سه پیاده‌سازی متفاوت کار کند:
+#   • Pyrogram رسمی 2.0.106  (پایتون ۳.۹ تا ۳.۱۱)
+#   • kurigram               (فورک به‌روز؛ پایتون ۳.۱۰ تا ۳.۱۴+)
+#   • pyrofork               (فورک به‌روز؛ پایتون ۳.۱۰ تا ۳.۱۴+)
+# تفاوت‌های کلیدی که این لایه یکدست می‌کند:
+#   ۱) حذف پارامتر disable_web_page_preview از edit_text/reply_text در فورک‌های جدید
+#      (جایگزین: link_preview_options)
+#   ۲) تغییر کلیدواژه‌های ChatPermissions در pyrofork (تفکیک رسانه‌ها)
+#   ۳) جایگزینی فیلدهای forward_from / forward_from_chat با شیء forward_origin
+#   ۴) نبود wheel برای tgcrypto روی پایتون ۳.۱۲+ (جایگزین: tgcrypto2)
+
+
+def _method_accepts(func: Any, name: str) -> bool:
+    """بررسی اینکه آیا یک تابع کلیدواژه مشخص را می‌پذیرد یا خیر"""
+    try:
+        params = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return True
+    if name in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def _install_link_preview_compat() -> List[str]:
+    """
+    ترجمه شفاف پارامتر قدیمی disable_web_page_preview به link_preview_options.
+
+    در فورک‌های جدید (kurigram) پارامتر disable_web_page_preview از توابع
+    edit_text و reply_text حذف شده است؛ بدون این لایه، همه فراخوانی‌های ربات با
+    TypeError می‌شکستند. این تابع یک بار در زمان بارگذاری اجرا می‌شود و فقط در صورت
+    نیاز، پوسته‌ای سازگار دور همان توابع می‌گذارد (بدون تغییر رفتار در Pyrogram رسمی).
+    """
+    patched: List[str] = []
+    try:
+        from pyrogram.types import LinkPreviewOptions
+    except Exception:
+        LinkPreviewOptions = None
+
+    for owner, name in (
+        (Message, "edit_text"),
+        (Message, "reply_text"),
+        (Message, "edit_caption"),
+        (Message, "reply"),
+        (Client, "send_message"),
+        (Client, "edit_message_text"),
+    ):
+        func = getattr(owner, name, None)
+        if func is None or getattr(func, "_nsmc_preview_patched", False):
+            continue
+        if _method_accepts(func, "disable_web_page_preview"):
+            continue
+        if not _method_accepts(func, "link_preview_options"):
+            continue
+
+        def make_wrapper(original, owner_name, method_name):
+            # پوسته همگام (نه async): کتابخانه تلگرام، متدها را طوری می‌پوشاند که هم با
+            # await و هم به‌صورت همگام قابل استفاده باشند. این پوسته فقط کلیدواژه را
+            # ترجمه می‌کند و دقیقاً همان چیزی را برمی‌گرداند که تابع اصلی برمی‌گرداند.
+            @functools.wraps(original)
+            def wrapper(self, *args, **kwargs):
+                disabled = kwargs.pop("disable_web_page_preview", None)
+                if disabled and LinkPreviewOptions is not None and "link_preview_options" not in kwargs:
+                    try:
+                        kwargs["link_preview_options"] = LinkPreviewOptions(is_disabled=True)
+                    except Exception:
+                        pass
+                return original(self, *args, **kwargs)
+
+            wrapper.__qualname__ = f"{owner_name}.{method_name}"
+            wrapper._nsmc_preview_patched = True
+            return wrapper
+
+        try:
+            setattr(owner, name, make_wrapper(func, owner.__name__, name))
+            patched.append(f"{owner.__name__}.{name}")
+        except Exception as exc:
+            logger.warning(f"اعمال لایه سازگاری روی {owner.__name__}.{name} ناموفق بود: {exc}")
+    return patched
+
+
+def detect_telegram_library() -> Tuple[str, str]:
+    """تشخیص اینکه ماژول pyrogram توسط کدام پکیج (رسمی یا فورک) نصب شده است"""
+    for dist in ("kurigram", "pyrofork", "Pyrogram", "pyrogram"):
+        try:
+            return dist, pkg_metadata.version(dist)
+        except Exception:
+            continue
+    return "pyrogram", str(getattr(pyrogram, "__version__", "نامشخص"))
+
+
+def detect_mixed_installs() -> List[str]:
+    """
+    تشخیص نصب هم‌زمان چند کتابخانه تلگرام.
+
+    Pyrogram رسمی، kurigram و pyrofork هر سه پوشه‌ای به نام «pyrogram» در
+    site-packages می‌سازند؛ نصب هم‌زمان آن‌ها فایل‌ها را خراب می‌کند و رفتار
+    غیرقابل پیش‌بینی می‌سازد. این تابع نام پکیج‌های نصب‌شده را برمی‌گرداند.
+    """
+    found: Dict[str, str] = {}
+    for dist in ("pyrogram", "kurigram", "pyrofork"):
+        try:
+            found[dist] = pkg_metadata.version(dist)
+        except Exception:
+            continue
+    return [f"{name} {ver}" for name, ver in found.items()] if len(found) > 1 else []
+
+
+def detect_crypto_acceleration() -> bool:
+    """آیا شتاب‌دهنده رمزنگاری (tgcrypto/tgcrypto2) نصب است؟"""
+    try:
+        import tgcrypto  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+TELEGRAM_LIB, TELEGRAM_LIB_VERSION = detect_telegram_library()
+CRYPTO_ACCELERATED = detect_crypto_acceleration()
+PREVIEW_COMPAT_PATCHED = _install_link_preview_compat()
+
+
+def is_official_pyrogram() -> bool:
+    """آیا نسخه رسمی (و قدیمی) Pyrogram نصب است؟"""
+    return str(TELEGRAM_LIB).lower() == "pyrogram"
+
+
+def runtime_report() -> Dict[str, Any]:
+    """گزارش فنی محیط اجرا برای نمایش در منوی «وضعیت سیستم»"""
+    return {
+        "python": platform.python_version(),
+        "python_info": sys.version_info,
+        "library": TELEGRAM_LIB,
+        "library_version": TELEGRAM_LIB_VERSION,
+        "crypto": CRYPTO_ACCELERATED,
+        "patched": PREVIEW_COMPAT_PATCHED,
+        "official": is_official_pyrogram(),
+        "mixed": detect_mixed_installs(),
+    }
+
+
+def compatibility_warnings() -> List[str]:
+    """هشدارهای سازگاری همراه با دستور اصلاح (فارسی و آماده کپی)"""
+    warns: List[str] = []
+    info = sys.version_info
+    exe = f'"{sys.executable}"' if " " in sys.executable else sys.executable
+
+    mixed = detect_mixed_installs()
+    if mixed:
+        keep = "kurigram" if info >= (3, 10) else "Pyrogram"
+        drop = [name.split()[0] for name in mixed if name.split()[0].lower() != keep.lower()]
+        warns.append(
+            "⚠️ بیش از یک کتابخانه تلگرام به‌طور هم‌زمان نصب است و فایل‌های ماژول pyrogram را خراب می‌کند:\n"
+            f"   نصب‌شده‌ها: {', '.join(mixed)}\n"
+            f"   برای اصلاح، فقط «{keep}» را نگه دارید:\n"
+            f"   {exe} -m pip uninstall -y {' '.join(drop)}\n"
+            f"   {exe} -m pip install --force-reinstall {keep}"
+        )
+
+    if info >= (3, 12) and is_official_pyrogram():
+        warns.append(
+            f"⚠️ پایتون {platform.python_version()} با Pyrogram رسمی {TELEGRAM_LIB_VERSION} ترکیب شده است.\n"
+            f"   این نسخه برای پایتون ۳.۱۲+ نگهداری نمی‌شود؛ توصیه اکید، نصب فورک به‌روز kurigram است:\n"
+            f"   {exe} -m pip uninstall -y pyrogram\n"
+            f"   {exe} -m pip install kurigram"
+        )
+    elif info < (3, 9):
+        warns.append(
+            f"⚠️ پایتون {platform.python_version()} قدیمی‌تر از حداقل نسخه پشتیبانی‌شده (۳.۹) است."
+        )
+
+    if not CRYPTO_ACCELERATED:
+        if info >= (3, 12):
+            warns.append(
+                "⚠️ شتاب‌دهنده رمزنگاری نصب نیست (سرعت ربات کمتر می‌شود، ولی کار می‌کند).\n"
+                f"   برای پایتون {platform.python_version()} از پکیج tgcrypto2 استفاده کنید (wheel آماده دارد):\n"
+                f"   {exe} -m pip install tgcrypto2"
+            )
+        else:
+            warns.append(
+                "⚠️ شتاب‌دهنده رمزنگاری نصب نیست (سرعت ربات کمتر می‌شود، ولی کار می‌کند).\n"
+                f"   {exe} -m pip install tgcrypto==1.2.5"
+            )
+
+    return warns
+
+
+def restricted_chat_permissions() -> ChatPermissions:
+    """محدودسازی کامل ارسال پیام تا زمان حل کپچا (سازگار با همه نسخه‌ها)"""
+    return ChatPermissions(can_send_messages=False)
+
+
+def unrestricted_chat_permissions() -> ChatPermissions:
+    """
+    بازگرداندن دسترسی کامل کاربر پس از تأیید کپچا.
+
+    Pyrogram 2.0.106 و kurigram کلیدواژه‌های قدیمی (can_send_media_messages و
+    can_send_other_messages) را می‌پذیرند، اما pyrofork آن‌ها را با کلیدواژه‌های
+    تفکیک‌شده رسانه (can_send_photos و …) جایگزین کرده است. این تابع هر دو امضا را
+    امتحان می‌کند تا ربات روی همه کتابخانه‌ها یکسان کار کند.
+    """
+    legacy_kwargs: Dict[str, bool] = dict(
+        can_send_messages=True,
+        can_send_media_messages=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+        can_send_polls=True,
+        can_invite_users=True,
+    )
+    modern_kwargs: Dict[str, bool] = dict(
+        can_send_messages=True,
+        can_add_web_page_previews=True,
+        can_send_polls=True,
+        can_invite_users=True,
+        can_send_audios=True,
+        can_send_docs=True,
+        can_send_games=True,
+        can_send_gifs=True,
+        can_send_inline=True,
+        can_send_photos=True,
+        can_send_plain=True,
+        can_send_roundvideos=True,
+        can_send_stickers=True,
+        can_send_videos=True,
+        can_send_voices=True,
+    )
+    for kwargs in (legacy_kwargs, modern_kwargs):
+        try:
+            return ChatPermissions(**kwargs)
+        except TypeError:
+            continue
+        except Exception as exc:
+            logger.debug(f"ساخت ChatPermissions ناموفق بود: {exc}")
+    return ChatPermissions(can_send_messages=True)
+
+
+# ---------------------------------------------------------------------------
+# دسترسی یکدست به اطلاعات پیام فورواردشده (سازگار با forward_origin و فیلدهای قدیمی)
+# ---------------------------------------------------------------------------
+def get_forward_origin(message: Message) -> Optional[Any]:
+    """شیء جدید forward_origin در فورک‌های به‌روز (در Pyrogram رسمی وجود ندارد)"""
+    return getattr(message, "forward_origin", None)
+
+
+def is_forwarded_message(message: Message) -> bool:
+    """آیا پیام فوروارد شده است؟ (بدون فعال‌کردن هشدارهای deprecation)"""
+    if get_forward_origin(message) is not None:
+        return True
+    return bool(
+        getattr(message, "forward_date", None)
+        or getattr(message, "forward_from", None)
+        or getattr(message, "forward_from_chat", None)
+    )
+
+
+def get_forward_user(message: Message) -> Optional[User]:
+    """کاربر مبدأ پیام فورواردشده (در صورت مخفی نبودن حساب)"""
+    origin = get_forward_origin(message)
+    if origin is not None:
+        return getattr(origin, "sender_user", None)
+    return getattr(message, "forward_from", None)
+
+
+def get_forward_user_id(message: Message) -> Optional[int]:
+    """آیدی عددی کاربر مبدأ؛ اگر حساب مخفی باشد None برمی‌گردد"""
+    user = get_forward_user(message)
+    if user is not None and getattr(user, "id", None):
+        return int(user.id)
+    legacy_id = getattr(message, "forward_from_id", None)
+    if legacy_id:
+        return int(legacy_id)
+    origin = get_forward_origin(message)
+    if origin is not None:
+        sender_id = getattr(origin, "sender_user_id", None)
+        if sender_id:
+            return int(sender_id)
+    return None
+
+
+def get_forward_chat(message: Message) -> Optional[Any]:
+    """چت/کانال مبدأ پیام فورواردشده"""
+    origin = get_forward_origin(message)
+    if origin is not None:
+        return getattr(origin, "chat", None) or getattr(origin, "sender_chat", None)
+    return getattr(message, "forward_from_chat", None)
+
+
+def get_forward_sender_name(message: Message) -> str:
+    """نام نمایشی فرستنده (وقتی حساب کاربر مخفی است)"""
+    origin = get_forward_origin(message)
+    if origin is not None:
+        name = getattr(origin, "sender_user_name", None)
+        if name:
+            return str(name)
+    return str(getattr(message, "forward_sender_name", "") or "")
+
+
+def get_forward_date(message: Message) -> Optional[int]:
+    """زمان فوروارد شدن پیام"""
+    origin = get_forward_origin(message)
+    if origin is not None:
+        date = getattr(origin, "date", None)
+        if date:
+            return int(date)
+    date = getattr(message, "forward_date", None)
+    return int(date) if date else None
+
 
 # ---------------------------------------------------------------------------
 # ۶. توابع کمکی امنیتی، لاگ‌گیری و اعلان‌های پیوی (Helpers & Logging Policy)
@@ -889,7 +1233,7 @@ async def process_member_join_or_add(
                 await client.restrict_chat_member(
                     chat_id,
                     member.id,
-                    ChatPermissions(can_send_messages=False)
+                    restricted_chat_permissions()
                 )
             except Exception as e:
                 logger.warning(f"عدم امکان محدودسازی کاربر {member.id}: {e}")
@@ -999,7 +1343,7 @@ async def process_member_join_or_add(
             await client.restrict_chat_member(
                 chat_id,
                 member.id,
-                ChatPermissions(can_send_messages=False)
+                restricted_chat_permissions()
             )
         except Exception:
             pass
@@ -1196,18 +1540,12 @@ async def on_captcha_callback(client: Client, query: CallbackQuery):
     save_state()
 
     # ۳. بازگرداندن دسترسی کامل ارسال پیام به کاربر
+    #    (از لایه سازگاری استفاده می‌شود تا روی pyrogram/kurigram/pyrofork یکسان کار کند)
     try:
         await client.restrict_chat_member(
             chat_id,
             target_user_id,
-            ChatPermissions(
-                can_send_messages=True,
-                can_send_media_messages=True,
-                can_send_other_messages=True,
-                can_add_web_page_previews=True,
-                can_send_polls=True,
-                can_invite_users=True
-            )
+            unrestricted_chat_permissions()
         )
     except Exception as e:
         logger.warning(f"عدم امکان آزادسازی پرمیشن کاربر {target_user_id}: {e}")
@@ -2777,11 +3115,12 @@ def build_system_info_menu() -> Tuple[str, InlineKeyboardMarkup]:
     channel = resolve_log_channel()
     channel_str = f"`{channel}`" if channel else "تنظیم نشده"
     channel_logs_on = get_setting("notifications", "send_logs_to_channel", False)
+    compat_warns = compatibility_warnings()
 
     text = (
         f"ℹ️ **اطلاعات سیستم و امنیت ربات**\n"
         f"{SEP}\n"
-        f"🤖 **نسخه ربات:** `{BOT_VERSION} (PV Moderation & Silent Status Logs)`\n"
+        f"🤖 **نسخه ربات:** `{BOT_VERSION} (Python 3.9–3.14 Compat)`\n"
         f"⏱️ **آپ‌تایم جاری:** {format_uptime(time.time() - BOT_START_TIME)}\n"
         f"🛡️ **اونر/مدیران مجاز:** {admin_list_str}\n"
         f"👥 **سوپرگروه‌های متصل:** `{len(known_groups)}` گروه\n"
@@ -2789,7 +3128,9 @@ def build_system_info_menu() -> Tuple[str, InlineKeyboardMarkup]:
         f"🚫 **سوابق بن:** `{len(ban_records)}` مورد\n"
         f"📮 **کانال لاگ:** {channel_str} (ارسال لاگ: {_switch(bool(channel_logs_on))})\n"
         f"💾 **حجم فایل وضعیت:** `{round(state_size / 1024, 2)} KB` | **کانفیگ:** `{round(config_size / 1024, 2)} KB`\n"
-        f"🐍 **پایتون:** `{platform.python_version()}` | **Pyrogram:** `{pyrogram.__version__}`\n"
+        f"🐍 **پایتون:** `{platform.python_version()}` | **کتابخانه:** `{TELEGRAM_LIB} {TELEGRAM_LIB_VERSION}`\n"
+        f"🔐 **شتاب رمزنگاری:** {_switch(CRYPTO_ACCELERATED)} (tgcrypto/tgcrypto2)\n"
+        f"🧩 **وضعیت سازگاری:** {_switch(not compat_warns)}\n"
         f"📱 **پلتفرم:** `{platform.system()}` — سازگار با ترموکس، ویندوز و لینوکس\n"
         f"{SEP}\n"
         f"🔒 **سیاست امنیت لاگ:**\n"
@@ -2797,12 +3138,67 @@ def build_system_info_menu() -> Tuple[str, InlineKeyboardMarkup]:
         f"• هیچ لاگ امنیتی به داخل گروه‌های محافظت‌شده ارسال نمی‌شود\n"
         f"• عملیات بن/آزادسازی از پیوی، بدون هیچ پیامی در گروه اجرا می‌شود"
     )
+    if compat_warns:
+        text += (
+            f"\n{SEP}\n"
+            f"⚠️ **{len(compat_warns)} نکته سازگاری محیط اجرا** — برای دیدن دستور نصب صحیح، "
+            f"دکمه «🧩 سازگاری پایتون و کتابخانه» را بزنید."
+        )
     keyboard = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("⚡ پینگ واقعی API تلگرام", callback_data="ping:check"),
             InlineKeyboardButton("🔔 لاگ و اعلان‌ها", callback_data="menu:logs")
         ],
+        [InlineKeyboardButton("🧩 سازگاری پایتون و کتابخانه", callback_data="menu:compat")],
         [InlineKeyboardButton("🔄 به‌روزرسانی", callback_data="menu:info")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu:main")]
+    ])
+    return text, keyboard
+
+
+def build_compat_menu() -> Tuple[str, InlineKeyboardMarkup]:
+    """
+    گزارش سازگاری محیط اجرا: نسخه پایتون، کتابخانه تلگرام، شتاب رمزنگاری
+    و دستورهای آماده‌کپی برای اصلاح محیط (سازگار با پایتون ۳.۹ تا ۳.۱۴).
+    """
+    info = runtime_report()
+    py = info["python"]
+    exe = sys.executable or "python"
+    exe_cmd = f'"{exe}"' if " " in exe else exe
+    warn_list = compatibility_warnings()
+    warn_block = "\n".join(warn_list) if warn_list else "✅ هیچ هشدار سازگاری‌ای ثبت نشد؛ محیط اجرا استاندارد است."
+    mixed_block = (
+        f"🧨 **نصب تداخلی:** `{' + '.join(info['mixed'])}` (خطرناک — باید اصلاح شود)\n"
+        if info["mixed"] else ""
+    )
+
+    text = (
+        f"🧩 **سازگاری پایتون و کتابخانه‌ها**\n"
+        f"{SEP}\n"
+        f"🐍 **پایتون:** `{py}` ({platform.system()})\n"
+        f"📦 **کتابخانه فعال:** `{info['library']} {info['library_version']}`\n"
+        f"{mixed_block}"
+        f"🔐 **شتاب رمزنگاری:** {_switch(info['crypto'])}\n"
+        f"🩹 **لایه سازگاری فعال روی:** `{', '.join(info['patched']) or 'نیاز نبود'}`\n"
+        f"{SEP}\n"
+        f"{warn_block}\n"
+        f"{SEP}\n"
+        f"📋 **دستورهای نصب (PowerShell / CMD / ترموکس):**\n\n"
+        f"۱) پایتون ۳.۹ تا ۳.۱۱ — Pyrogram رسمی:\n"
+        f"`{exe_cmd} -m pip install -r requirements.txt`\n\n"
+        f"۲) پایتون ۳.۱۲ / ۳.۱۳ / ۳.۱۴ — فورک به‌روز kurigram:\n"
+        f"`{exe_cmd} -m pip uninstall -y pyrogram`\n"
+        f"`{exe_cmd} -m pip install -r requirements.txt`\n\n"
+        f"۳) بررسی نهایی:\n"
+        f"`{exe_cmd} -c \"import pyrogram,sys;print(sys.version.split()[0], pyrogram.__version__)\"`\n\n"
+        f"💡 فایل `requirements.txt` خودش نسخه درست را بر اساس پایتون شما انتخاب می‌کند "
+        f"(environment markers)؛ نیازی به ویرایش دستی نیست.\n"
+        f"⚠️ اگر نصب `TgCrypto`/`tgcrypto2` روی سیستم شما شکست خورد (نبود کامپایلر)، "
+        f"ربات بدون آن هم کار می‌کند؛ فقط کتابخانه اصلی را نصب کنید."
+    )
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("ℹ️ بازگشت به وضعیت سیستم", callback_data="menu:info")],
+        [InlineKeyboardButton("🔄 به‌روزرسانی گزارش", callback_data="menu:compat")],
         [InlineKeyboardButton("🏠 منوی اصلی", callback_data="menu:main")]
     ])
     return text, keyboard
@@ -2876,7 +3272,7 @@ async def handle_admin_input(client: Client, message: Message):
 
     # هیچ حالت فعالی وجود ندارد
     if not state:
-        if text and not text.startswith("/") and not message.forward_date:
+        if text and not text.startswith("/") and not is_forwarded_message(message):
             await message.reply_text(
                 f"ℹ️ **هیچ عملیات نیمه‌تمامی در انتظار ورودی نیست.**\n"
                 f"{SEP}\n"
@@ -2916,8 +3312,8 @@ async def handle_admin_input(client: Client, message: Message):
     reason = ""
 
     # حالت ۱: کاربر، پیام یک عضو را فوروارد کرده است
-    forward_user = getattr(message, "forward_from", None)
-    forward_id = getattr(message, "forward_from_id", None)
+    forward_user = get_forward_user(message)
+    forward_id = get_forward_user_id(message)
     if forward_user is not None:
         target = as_target(forward_user)
         note = "ℹ️ هدف از روی پیام فورواردشده شناسایی شد."
@@ -3018,6 +3414,14 @@ async def handle_logs_command(client: Client, message: Message):
     if not await is_admin(client, message):
         return
     await _reply_panel(message, build_notifications_menu())
+
+
+@app.on_message(filters.command(["compat", "python", "install", "سازگاری", "نصب", "پایتون"]) & filters.private)
+async def handle_compat_command(client: Client, message: Message):
+    """گزارش سازگاری پایتون/کتابخانه و دستورهای نصب صحیح"""
+    if not await is_admin(client, message):
+        return
+    await _reply_panel(message, build_compat_menu())
 
 
 @app.on_message(filters.command(["cancel", "لغو", "انصراف"]) & filters.private)
@@ -3188,7 +3592,7 @@ async def handle_private_forward(client: Client, message: Message):
         return
 
     # ۱) فوروارد از کانال → تنظیم کانال لاگ (با تأیید دکمه‌ای، نه خودکار)
-    src_chat = message.forward_from_chat
+    src_chat = get_forward_chat(message)
     if src_chat is not None and src_chat.type == ChatType.CHANNEL:
         current = resolve_log_channel()
         text = (
@@ -3211,8 +3615,8 @@ async def handle_private_forward(client: Client, message: Message):
         return
 
     # ۲) فوروارد از کاربر → پنل بن/آزادسازی
-    forward_user = getattr(message, "forward_from", None)
-    forward_id = getattr(message, "forward_from_id", None)
+    forward_user = get_forward_user(message)
+    forward_id = get_forward_user_id(message)
     target: Optional[TargetUser] = None
     if forward_user is not None:
         target = as_target(forward_user)
@@ -3914,6 +4318,11 @@ async def on_admin_panel_callback(client: Client, query: CallbackQuery):
         await answer()
         return
 
+    if data == "menu:compat":
+        await show(build_compat_menu())
+        await answer()
+        return
+
     if data == "ping:check":
         start_t = time.time()
         try:
@@ -4032,8 +4441,12 @@ async def main():
     logger.info(f"ربات محافظ با نام @{BOT_ME.username} (ID: {BOT_ME.id}) فعال شد!")
     print("\n" + "=" * 60)
     print(f"✅ ربات با موفقیت روشن شد: @{BOT_ME.username} | نسخه {BOT_VERSION}")
+    print(f"🐍 پایتون {platform.python_version()} | {TELEGRAM_LIB} {TELEGRAM_LIB_VERSION}"
+          f" | رمزنگاری سریع: {'فعال' if CRYPTO_ACCELERATED else 'غیرفعال'}")
     print("آماده دریافت رویدادها و محافظت از سوپرگروه...")
     print("🔒 لاگ آنلاین/آفلاین فقط به پیوی اونر ارسال می‌شود (نه گروه).")
+    for warn in compatibility_warnings():
+        print(warn)
     print("=" * 60 + "\n")
 
     # 🔔 اعلان روشن شدن ربات: فقط پیوی اونر — هرگز گروه یا کانال لاگ
@@ -4041,12 +4454,25 @@ async def main():
         f"🟢 **ربات محافظ گروه آنلاین شد**\n"
         f"🤖 ربات: @{BOT_ME.username} (`{BOT_ME.id}`)\n"
         f"🧩 نسخه: `{BOT_VERSION}`\n"
+        f"🐍 پایتون: `{platform.python_version()}` | کتابخانه: `{TELEGRAM_LIB} {TELEGRAM_LIB_VERSION}`\n"
         f"👥 گروه‌های ثبت‌شده: `{len(known_groups)}`\n"
         f"⏳ در انتظار کپچا: `{len(unverified_joins)}` نفر\n"
         f"🚫 سوابق بن: `{len(ban_records)}` مورد\n"
         f"🚀 وضعیت: آماده به کار\n"
         f"🔒 این اعلان فقط در پیوی شما ارسال شده و هیچ پیامی به گروه نرفته است."
     )
+
+    # 🧩 هشدارهای سازگاری محیط اجرا (پایتون ۳.۱۲+/tgcrypto) فقط به پیوی اونر
+    compat_warns = compatibility_warnings()
+    if compat_warns:
+        await send_status_log(
+            f"🧩 **گزارش سازگاری محیط اجرا**\n"
+            f"🐍 پایتون: `{platform.python_version()}` | کتابخانه: `{TELEGRAM_LIB} {TELEGRAM_LIB_VERSION}`\n"
+            f"🔐 شتاب رمزنگاری: {_switch(CRYPTO_ACCELERATED)}\n"
+            f"{SEP}\n"
+            + "\n".join(compat_warns)
+            + f"\n{SEP}\n💡 در پیوی ربات دستور `/compat` را بفرستید تا گزارش کامل و دستور نصب نمایش داده شود."
+        )
 
     # بررسی سیاست لاگ و هشدار در صورت تنظیم خطرناک کانال لاگ
     await warn_log_channel_policy()
