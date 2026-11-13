@@ -1,0 +1,15 @@
+# فایل‌های موقت و خروجی پایتون
+__pycache__/
+*.py[cod]
+*.tmp
+config.json.tmp
+bot_state.json.tmp
+
+# محیط مجازی
+.venv/
+venv/
+
+# ⚠️ فایل‌های حساس تلگرام — هرگز نباید در ریپازیتوری commit شوند
+*.session
+*.session-journal
+config.save
