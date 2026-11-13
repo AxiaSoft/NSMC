@@ -1,5 +1,42 @@
 # 📋 تغییرات ربات محافظ سوپرگروه (NSMC Security Bot)
 
+## نسخه ۴.۱.۱ — ۲۰۲۶-۱۱-۱۳
+
+### 🚀 رفع خطای راه‌اندازی روی kurigram (پایتون ۳.۱۴)
+
+خطای گزارش‌شده کاربر هنگام اجرا روی ویندوز/پایتون ۳.۱۴:
+
+```
+RuntimeWarning: coroutine 'main' was never awaited
+CRITICAL | AntiRaidBot: خطای بحرانی در اجرای ربات: Run.run() takes 1 positional argument but 2 were given
+```
+
+- **علت:** امضای `Client.run` در kurigram به شکل `run(self, *, use_qr=False, except_ids=None)`
+  است، یعنی **هیچ آرگومان پوزیشنالی نمی‌گیرد**؛ اما Pyrogram رسمی و pyrofork
+  `run(self, coroutine=None)` دارند. فراخوانی `app.run(main())` روی kurigram با `TypeError` می‌شکست.
+- **راه‌حل:** نقطه ورود جدید `run_bot(main)` که امضای `app.run` را در زمان اجرا بررسی می‌کند:
+  - Pyrogram رسمی / pyrofork → `app.run(main())`
+  - kurigram → `asyncio.run(main())`
+  - اگر کتابخانه‌ای ناگهان `TypeError: ... positional argument ...` بدهد، به‌صورت خودکار
+    به `asyncio.run` برگشت می‌خورد (بدون از دست دادن coroutine).
+- **`align_running_loop()`:** پیش از `app.start()` لوپ داخلی `Client`/`Dispatcher` با لوپ در حال
+  اجرا هم‌تراز می‌شود؛ چون در Pyrogram رسمی Dispatcher هنگام ساخت کلاینت
+  `asyncio.get_event_loop()` را ذخیره می‌کند و در مسیر `asyncio.run` لوپ‌ها متفاوت می‌شدند
+  (در آن حالت تسک‌های هندلر هرگز اجرا نمی‌شدند).
+- منوی `/compat` و «وضعیت سیستم» حالا **روش اجرای فعال** (`app.run(main())` یا
+  `asyncio.run(main())`) را هم نشان می‌دهند.
+
+### ✅ اعتبارسنجی این نسخه
+
+- بررسی ایستای امضاها (۸۷ فراخوانی `Client`/`Message`/`CallbackQuery` در `bot.py`) در برابر
+  هر سه کتابخانه: تنها مورد باقی‌مانده `Message.edit_text(disable_web_page_preview=...)` است
+  که همان لایه سازگاری نسخه ۴.۱.۰ در زمان اجرا ترجمه‌اش می‌کند.
+- تست سرتاسری آفلاین (client تلگرام stub شده) روی هر سه کتابخانه، با و بدون شبیه‌سازی
+  semantics پایتون ۳.۱۴ → توالی کامل `start → get_me → DM آنلاین → DM گزارش سازگاری →
+  idle → DM آفلاین → stop` و همه اعلان‌ها فقط به پیوی اونر (شناسه مثبت)، هیچ‌کدام به گروه.
+- هندلس: Pyrogram 2.0.106 → ۴۷ بررسی PASS، kurigram 2.2.27 → ۴۸ بررسی PASS،
+  pyrofork 2.3.69 → ۴۷ بررسی PASS.
+
 ## نسخه ۴.۱.۰ — ۲۰۲۶-۱۱-۱۳
 
 ### 🐍 پشتیبانی کامل از پایتون ۳.۱۲ / ۳.۱۳ / ۳.۱۴

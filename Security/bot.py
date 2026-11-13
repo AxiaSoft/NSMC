@@ -120,7 +120,7 @@ logger = logging.getLogger("AntiRaidBot")
 # ---------------------------------------------------------------------------
 # ۲. ساختار تنظیمات پیش‌فرض (Default Config)
 # ---------------------------------------------------------------------------
-BOT_VERSION: str = "4.1.0"
+BOT_VERSION: str = "4.1.1"
 
 # ساختار تنظیمات پیش‌فرض (Default Config)
 # نکته: کلیدهای جدید نسخه ۴ به صورت «ادغام عمیق» با config.json موجود ترکیب می‌شوند،
@@ -612,6 +612,100 @@ def is_official_pyrogram() -> bool:
     return str(TELEGRAM_LIB).lower() == "pyrogram"
 
 
+# ---------------------------------------------------------------------------
+# نقطه ورود سازگار با همه کتابخانه‌ها (app.run vs asyncio.run)
+# ---------------------------------------------------------------------------
+# Pyrogram رسمی و pyrofork:   Client.run(self, coroutine=None)   → app.run(main())
+# kurigram:                   Client.run(self, *, use_qr=False, except_ids=None)
+#                             → هیچ آرگومان پوزیشنالی نمی‌گیرد و فراخوانی app.run(main())
+#                               با خطای «Run.run() takes 1 positional argument but 2 were given»
+#                               می‌شکند؛ در این حالت از asyncio.run(main()) استفاده می‌کنیم.
+def _accepts_positional_arg(func: Any) -> bool:
+    """آیا تابع دست‌کم یک آرگومان پوزیشنال (غیر از self) می‌پذیرد؟"""
+    try:
+        params = list(inspect.signature(func).parameters.values())
+    except (TypeError, ValueError):
+        return True
+    for p in params:
+        if p.name == "self":
+            continue
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.VAR_POSITIONAL,
+        ):
+            return True
+    return False
+
+
+def detect_entrypoint_style() -> str:
+    """سبک اجرای پشتیبانی‌شده توسط کتابخانه فعال"""
+    run = getattr(app, "run", None)
+    if run is not None and _accepts_positional_arg(run):
+        return "app.run(main())"
+    return "asyncio.run(main())"
+
+
+def align_running_loop() -> None:
+    """
+    هم‌تراز کردن لوپ داخلی کلاینت/dispatcher با لوپ در حال اجرا.
+
+    در Pyrogram رسمی، Dispatcher هنگام ساخت کلاینت نتیجه asyncio.get_event_loop()
+    را در خود نگه می‌دارد. اگر ربات با asyncio.run اجرا شود (مسیر فورک‌های جدید)،
+    لوپ در حال اجرا متفاوت از آن لوپ اولیه است و تسک‌های هندلر هرگز اجرا نمی‌شوند؛
+    این تابع پیش از start() آن‌ها را یکی می‌کند.
+    """
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    targets = [app, getattr(app, "dispatcher", None)]
+    for obj in targets:
+        if obj is None:
+            continue
+        for attr in ("loop", "_loop"):
+            try:
+                current = getattr(obj, attr, None)
+            except Exception:
+                continue
+            if isinstance(current, asyncio.AbstractEventLoop) and current is not running:
+                try:
+                    setattr(obj, attr, running)
+                    logger.info(f"لوپ {type(obj).__name__}.{attr} با لوپ در حال اجرا هم‌تراز شد.")
+                except Exception as exc:
+                    logger.debug(f"هم‌ترازسازی لوپ {attr} ناموفق بود: {exc}")
+
+
+def run_bot(main_func) -> None:
+    """اجرای ربات با روش سازگار با کتابخانه نصب‌شده"""
+    run = getattr(app, "run", None)
+
+    if run is not None and _accepts_positional_arg(run):
+        coro = main_func()
+        try:
+            run(coro)
+            return
+        except TypeError as exc:
+            if "positional argument" not in str(exc).lower():
+                raise
+            logger.warning(
+                f"app.run(coroutine) در {TELEGRAM_LIB} پشتیبانی نمی‌شود ({exc})؛ "
+                f"ربات با asyncio.run اجرا می‌شود."
+            )
+            try:
+                coro.close()
+            except Exception:
+                pass
+    else:
+        logger.info(
+            f"{TELEGRAM_LIB} {TELEGRAM_LIB_VERSION} آرگومان پوزیشنال برای app.run نمی‌پذیرد؛ "
+            f"ربات با asyncio.run اجرا می‌شود."
+        )
+
+    asyncio.run(main_func())
+
+
 def runtime_report() -> Dict[str, Any]:
     """گزارش فنی محیط اجرا برای نمایش در منوی «وضعیت سیستم»"""
     return {
@@ -623,6 +717,7 @@ def runtime_report() -> Dict[str, Any]:
         "patched": PREVIEW_COMPAT_PATCHED,
         "official": is_official_pyrogram(),
         "mixed": detect_mixed_installs(),
+        "entrypoint": detect_entrypoint_style(),
     }
 
 
@@ -3179,6 +3274,7 @@ def build_compat_menu() -> Tuple[str, InlineKeyboardMarkup]:
         f"📦 **کتابخانه فعال:** `{info['library']} {info['library_version']}`\n"
         f"{mixed_block}"
         f"🔐 **شتاب رمزنگاری:** {_switch(info['crypto'])}\n"
+        f"🚀 **روش اجرا:** `{info['entrypoint']}`\n"
         f"🩹 **لایه سازگاری فعال روی:** `{', '.join(info['patched']) or 'نیاز نبود'}`\n"
         f"{SEP}\n"
         f"{warn_block}\n"
@@ -4424,6 +4520,9 @@ async def main():
     """اجرای ناهمگام ربات و بارگذاری سرویس‌ها"""
     global BOT_ME, BOT_START_TIME
 
+    # هم‌ترازسازی لوپ داخلی کلاینت با لوپ در حال اجرا (سازگاری با asyncio.run)
+    align_running_loop()
+
     if not API_ID or not API_HASH or not BOT_TOKEN or API_ID == 0 or "YOUR_" in str(BOT_TOKEN) or "YOUR_" in str(API_HASH):
         print("\n" + "=" * 70)
         print("❌ خطا: مقادیر احراز هویت تلگرام در config.json هنوز تنظیم نشده‌اند!")
@@ -4518,7 +4617,10 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        app.run(main())
+        # اجرای سازگار با همه کتابخانه‌ها:
+        #   Pyrogram رسمی / pyrofork → app.run(main())
+        #   kurigram                 → asyncio.run(main())
+        run_bot(main)
     except KeyboardInterrupt:
         print("\nخروج توسط کاربر انجام شد.")
     except Exception as e:

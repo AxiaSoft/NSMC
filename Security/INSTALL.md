@@ -30,11 +30,17 @@ C:\Python314\python.exe -m pip install -r requirements.txt
 # ۳. بررسی نصب
 C:\Python314\python.exe -c "import sys, pyrogram; print(sys.version.split()[0], pyrogram.__version__)"
 
+# اگر دستور بالا در PowerShell دردسر داشت، این نسخه ساده‌تر است:
+C:\Python314\python.exe -c "import importlib.metadata as m; print(m.version('kurigram'))"
+
 # ۴. اجرای ربات
 C:\Python314\python.exe bot.py
 ```
 
 خروجی مرحله ۳ باید چیزی شبیه این باشد: `3.14.0 2.2.27`
+
+> ⚠️ دقت کنید `pyrogram.__version__` است (دو زیرخط قبل و بعد `version`)؛
+> `pyrogram.version` وجود ندارد و خطای `AttributeError` می‌دهد.
 
 ---
 
@@ -103,6 +109,7 @@ python bot.py
 | خطا / نشانه | علت | راه‌حل |
 | --- | --- | --- |
 | `RuntimeError: There is no current event loop in thread 'MainThread'` | Pyrogram رسمی روی پایتون ۳.۱۲+ | ربات از نسخه ۴.۱.۰ یک شیم داخلی دارد؛ با این حال توصیه می‌شود `kurigram` نصب کنید |
+| `Run.run() takes 1 positional argument but 2 were given` + `coroutine 'main' was never awaited` | kurigram آرگومان پوزیشنال برای `app.run()` نمی‌گیرد | در نسخه ۴.۱.۱ رفع شده (نقطه ورود `run_bot` خودش `asyncio.run(main())` را انتخاب می‌کند) — فایل `bot.py` را به‌روز بگیرید |
 | `TgCrypto is missing! Pyrogram will work the same, but at a much slower speed` | شتاب‌دهنده رمزنگاری نصب نیست | پایتون ≥ ۳.۱۲: `pip install tgcrypto2` — پایتون ≤ ۳.۱۱: `pip install TgCrypto==1.2.5` |
 | `Microsoft Visual C++ 14.0 or greater is required` | `TgCrypto` روی پایتون ≥ ۳.۱۲ wheel ندارد | به جای آن `pip install tgcrypto2` (wheel آماده cp314 دارد) یا کلاً نصب نکنید |
 | `ChatPermissions.__init__() got an unexpected keyword argument` | تفاوت امضای مجوزها بین نسخه‌ها | ربات از تابع `unrestricted_chat_permissions()` استفاده می‌کند که هر دو امضا را امتحان می‌کند — فایل `bot.py` را به‌روز بگیرید |
