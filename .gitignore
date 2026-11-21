@@ -9,6 +9,10 @@ bot_state.json.tmp
 .venv/
 venv/
 
+# پشتیبان موقت خودآزمایی (tests/selftest.py)
+.selftest_backup/
+Security/tests/.selftest_backup/
+
 # ⚠️ فایل‌های حساس تلگرام — هرگز نباید در ریپازیتوری commit شوند
 *.session
 *.session-journal

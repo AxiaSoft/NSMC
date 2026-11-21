@@ -6,6 +6,42 @@
 
 ---
 
+## ❗ دستور درست اجرای ربات (رایج‌ترین اشتباه)
+
+`bot.py` یک فایل **پایتون** است، نه اسکریپت **bash**. اگر بنویسید `bash bot.py`، پوسته سعی می‌کند
+کد پایتون را به‌عنوان دستور sh بخواند و انبوهی خطا می‌بینید:
+
+```
+bot.py: line 37: import: command not found
+bot.py: line 61: syntax error near unexpected token `('
+```
+
+| محیط | ✅ دستور درست | ❌ دستور غلط |
+| --- | --- | --- |
+| ترموکس / لینوکس / macOS | `python bot.py` | `bash bot.py` |
+| ویندوز (PowerShell) | `C:\Python314\python.exe bot.py` | `bash bot.py` |
+| هر محیطی — اجراکننده خودکار | `bash run.sh` (لینوکس/ترموکس) یا `run.bat` (ویندوز) | — |
+
+`run.sh` و `run.bat` مفسر درست پایتون را پیدا می‌کنند، در صورت نیاز وابستگی‌ها را نصب می‌کنند
+و بعد ربات را **با پایتون** اجرا می‌کنند.
+
+> 🛡️ از نسخه ۴.۱.۲ حتی اگر اشتباهاً `bash bot.py` بزنید، فایل در همان خط اول خودش را با
+> پایتون بازنقش (re-exec) می‌کند و ربات به‌جای خطاهای پوسته، به‌صورت عادی بالا می‌آید.
+> با این حال دستور درست و تمیز همان `python bot.py` است.
+
+### خودآزمایی محیط (بدون اتصال به تلگرام)
+
+```bash
+python tests/selftest.py --all
+```
+
+پایتون، کتابخانه نصب‌شده، لایه‌های سازگاری، روش اجرا، منوها، هندلرها و حتی چرخه کامل
+روشن/خاموش شدن ربات را به‌صورت آفلاین بررسی می‌کند و در پایان `RESULT: PASS` یا `FAIL` می‌نویسد.
+این اسکریپت هیچ پیامی ارسال نمی‌کند و از `config.json`/`bot_state.json` پشتیبان می‌گیرد و
+دقیقاً همان‌ها را برمی‌گرداند.
+
+---
+
 ## ۰) پیش‌نیاز مشترک
 
 ```powershell
@@ -61,15 +97,26 @@ py -3.11 bot.py
 
 ```bash
 pkg update -y && pkg install -y python clang libjpeg-turbo zlib openssl
-cd ~/Security
+termux-setup-storage        # فقط اگر ربات را در حافظه مشترک نگه می‌دارید
+cd ~/Security               # یا: cd /storage/emulated/0/Security
 pip install --upgrade pip
 pip install -r requirements.txt
-python bot.py
+python bot.py               # ✅ درست    |    bash bot.py  ❌ غلط
+```
+
+راه میان‌بر (پیشنهادی برای ترموکس) — خودش پایتون و وابستگی‌ها را بررسی می‌کند:
+
+```bash
+cd ~/Security
+bash run.sh
 ```
 
 > اگر نصب `TgCrypto`/`tgcrypto2` به دلیل نبود کامپایلر شکست خورد، **ربات بدون آن هم کار می‌کند**؛
 > فقط کتابخانه اصلی را نصب کنید:
 > `pip install "Pyrogram==2.0.106"` (پایتون ≤ ۳.۱۱) یا `pip install kurigram` (پایتون ≥ ۳.۱۲)
+
+> 📌 نسخه پایتون ترموکس را با `python -V` ببینید؛ اگر ۳.۱۲ یا بالاتر بود، `requirements.txt`
+> به‌صورت خودکار `kurigram` + `tgcrypto2` را نصب می‌کند و نیازی به کار دستی نیست.
 
 ---
 
@@ -108,6 +155,7 @@ python bot.py
 
 | خطا / نشانه | علت | راه‌حل |
 | --- | --- | --- |
+| `bot.py: line 37: import: command not found` یا `syntax error near unexpected token '('` | فایل با **bash** اجرا شده (`bash bot.py`) در حالی که یک فایل پایتون است | دستور درست: `python bot.py` — یا `bash run.sh`. از نسخه ۴.۱.۲ خود `bot.py` هم در این حالت خودش را با پایتون بازنقش می‌کند |
 | `RuntimeError: There is no current event loop in thread 'MainThread'` | Pyrogram رسمی روی پایتون ۳.۱۲+ | ربات از نسخه ۴.۱.۰ یک شیم داخلی دارد؛ با این حال توصیه می‌شود `kurigram` نصب کنید |
 | `Run.run() takes 1 positional argument but 2 were given` + `coroutine 'main' was never awaited` | kurigram آرگومان پوزیشنال برای `app.run()` نمی‌گیرد | در نسخه ۴.۱.۱ رفع شده (نقطه ورود `run_bot` خودش `asyncio.run(main())` را انتخاب می‌کند) — فایل `bot.py` را به‌روز بگیرید |
 | `TgCrypto is missing! Pyrogram will work the same, but at a much slower speed` | شتاب‌دهنده رمزنگاری نصب نیست | پایتون ≥ ۳.۱۲: `pip install tgcrypto2` — پایتون ≤ ۳.۱۱: `pip install TgCrypto==1.2.5` |
